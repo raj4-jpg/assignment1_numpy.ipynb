@@ -1,0 +1,155 @@
+import time
+import numpy as np
+import pandas as pd
+from numpy.lib.stride_tricks import sliding_window_view
+
+# Seed
+np.random.seed(42)
+
+# ==========================================
+# 1. Generation & Memory Inspection
+# ==========================================
+A = np.random.normal(loc=50.0, scale=12.0, size=(1000, 5))
+print("--- 1. Generation & Memory ---")
+print("Shape:", A.shape)
+print("Initial dtype:", A.dtype)
+print("Initial memory size (bytes):", A.nbytes)
+
+A = A.astype(np.float32)
+print("float32 memory size (bytes):", A.nbytes)
+
+# ==========================================
+# 2. Standardization via Broadcasting
+# ==========================================
+A = (A - A.mean(axis=0)) / A.std(axis=0)
+col_means = np.round(A.mean(axis=0), 6)
+col_stds = np.round(A.std(axis=0), 6)
+
+print("\n--- 2. Standardization ---")
+print("Column means:", col_means)
+print("Column stds: ", col_stds)
+
+# ==========================================
+# 3. Min-Max Scaling Function
+# ==========================================
+def minmax(X, axis=0):
+    min_val = np.min(X, axis=axis, keepdims=True)
+    max_val = np.max(X, axis=axis, keepdims=True)
+    return (X - min_val) / (max_val - min_val)
+
+scaled_ax0 = minmax(A, axis=0)
+scaled_ax1 = minmax(A, axis=1)
+
+print("\n--- 3. MinMax Scaling ---")
+print("axis=0 min==0:", np.allclose(scaled_ax0.min(axis=0), 0.0))
+print("axis=0 max==1:", np.allclose(scaled_ax0.max(axis=0), 1.0))
+print("axis=1 min==0:", np.allclose(scaled_ax1.min(axis=1), 0.0))
+print("axis=1 max==1:", np.allclose(scaled_ax1.max(axis=1), 1.0))
+
+# ==========================================
+# 4. Inject & Impute NaNs
+# ==========================================
+mask_nan = np.random.rand(*A.shape) < 0.05
+A[mask_nan] = np.nan
+
+col_nanmeans = np.nanmean(A, axis=0, keepdims=True)
+A = np.where(np.isnan(A), col_nanmeans, A)
+
+print("\n--- 4. Missing Values ---")
+print("Remaining NaNs count:", np.isnan(A).sum())
+print("Confirmation (== 0):", np.isnan(A).sum() == 0)
+
+# ==========================================
+# 5. Outlier Replacement (3-Sigma Rule)
+# ==========================================
+means = A.mean(axis=0, keepdims=True)
+stds = A.std(axis=0, keepdims=True)
+medians = np.median(A, axis=0, keepdims=True)
+
+outlier_mask = np.abs(A - means) > (3 * stds)
+replacements_per_col = outlier_mask.sum(axis=0)
+A = np.where(outlier_mask, medians, A)
+
+print("\n--- 5. Outlier Replacement ---")
+print("Replacements per column:", replacements_per_col)
+
+# ==========================================
+# 6. Vectorized Euclidean Distance Matrix
+# ==========================================
+A_sub = A[:200]  # Shape: (200, 5)
+diff = A_sub[:, np.newaxis, :] - A_sub[np.newaxis, :, :]
+dist_matrix = np.sqrt(np.sum(diff**2, axis=-1))
+
+print("\n--- 6. Euclidean Distance Matrix ---")
+print("Distance matrix shape:", dist_matrix.shape)
+print("Diagonal is all zeros:", np.allclose(np.diag(dist_matrix), 0.0))
+print("Matrix equals its transpose:", np.allclose(dist_matrix, dist_matrix.T))
+
+# ==========================================
+# 7. 5-Nearest Neighbors via argpartition
+# ==========================================
+partitioned_idx = np.argpartition(dist_matrix, kth=5, axis=1)
+knn_indices = partitioned_idx[:, 1:6]
+
+print("\n--- 7. k-Nearest Neighbors ---")
+print("KNN shape:", knn_indices.shape)
+print("First row 5-NN indices:", knn_indices[0])
+# Reason: argpartition finds the 5 smallest elements in O(N) linear time per row without sorting the remaining N-5 elements.
+
+# ==========================================
+# 8. Benchmark: np.bincount vs Python Loop
+# ==========================================
+rand_ints = np.random.randint(0, 100, size=1_000_000)
+
+# NumPy benchmark
+t0 = time.perf_counter()
+counts_np = np.bincount(rand_ints, minlength=100)
+t_numpy = time.perf_counter() - t0
+
+# Python loop benchmark
+t0 = time.perf_counter()
+counts_py = [0] * 100
+for val in rand_ints:
+    counts_py[val] += 1
+t_loop = time.perf_counter() - t0
+
+assert np.array_equal(counts_np, counts_py)
+speedup = t_loop / t_numpy
+
+print("\n--- 8. Speed Benchmark ---")
+print(f"NumPy time:   {t_numpy * 1000:.3f} ms")
+print(f"Python time:  {t_loop * 1000:.3f} ms")
+print(f"Speed-up factor: {speedup:.1f}x")
+
+# ==========================================
+# 9. Sliding Windows & Pandas Comparison
+# ==========================================
+arr_1d = np.random.rand(10_000)
+windows = sliding_window_view(arr_1d, window_shape=10)
+numpy_window_means = windows.mean(axis=1)
+pandas_window_means = pd.Series(arr_1d).rolling(10).mean().dropna().to_numpy()
+
+print("\n--- 9. Sliding Windows ---")
+print("Windows shape:", windows.shape)
+print("Matches pandas rolling mean:", np.allclose(numpy_window_means, pandas_window_means))
+
+# ==========================================
+# 10. Reshaping & Axis Reduction
+# ==========================================
+arr = np.random.rand(12, 8)
+reshaped = arr.reshape(4, 3, 8)
+reduced = reshaped.mean(axis=1)
+
+print("\n--- 10. Reshaping ---")
+print("Reduced shape:", reduced.shape)
+# Shape explanation: The 12 rows are grouped into 4 chunks of 3 consecutive rows; averaging along axis 1 condenses each 3-row group into its mean feature vector of length 8.
+
+# ==========================================
+# 11. Save, Load, and Assert Equality
+# ==========================================
+np.save("clean.npy", A)
+A_loaded = np.load("clean.npy")
+
+assert np.array_equal(A, A_loaded), "Loaded array does not match original array."
+print("\n--- 11. Persistence ---")
+print("Assertion passed: clean.npy matches array A exactly.")
